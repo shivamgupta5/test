@@ -352,3 +352,279 @@ unique_mf <- unique(main_effects)
 unique_mf
 
 h2o.predict(tweedie_model, train_split)$predict
+
+
+
+
+weighted_gini <- function(solution, weights, submission){
+  df <- data.frame(solution = solution, weights = weights, submission = submission)
+  df <- df[order(df$submission, decreasing = TRUE),]
+  df$random <- cumsum((df$weights/sum(df$weights)))
+  totalPositive <- sum(df$solution * df$weights)
+  df$cumPosFound <- cumsum(df$solution * df$weights)
+  df$Lorentz <- df$cumPosFound / totalPositive
+  n <- nrow(df)
+  gini <- sum(df$Lorentz[-1]*df$random[-n]) - sum(df$Lorentz[-n]*df$random[-1])
+return(gini)
+}
+
+normalized_weighted_gini <- function(solution, weights, submission) {
+	weighted_gini(solution, weights, submission) / weighted_gini(solution, weights, solution)
+}
+
+
+lr_percentile_chart <- function(data, target, predictions, weight, actual_loss,
+		                            pre_sort = FALSE, pre_sort_col = NULL, custom_cuts = FALSE,
+		                            cut_tbl, cut_tbl_bin, cut_tbl_label){
+
+require(plotly)
+require(rlang)
+    
+weight_sum <- sum(data[[weight]])+1
+
+if(pre_sort == TRUE){
+    df_sort <- data
+    df_sort$loss_ratio_band <- as.factor(data[[pre_sort_col]])
+    
+} else if(custom_cuts == TRUE){
+    df_sort <- data %>%
+                   arrange_at(.vars = c(predictions)) %>%
+                   mutate_at(.vars = c(weight),
+                             .funs = funs(cumulative_wgt = cumsum(.)/weight_sum)
+                             ) %>%
+                   mutate_at(.vars = c(predictions),
+                             .funs = funs(loss_ratio_band = cut(cumulative_wgt,
+                                                                breaks = c(0, cut_tbl[[cut_tbl_bin]]),
+                                                                labels = cut_tbl[[cut_tbl_label]])
+                                         )
+                            )
+} else{
+        df_sort <- data %>%
+                   arrange_at(.vars = c(predictions)) %>%
+                   mutate_at(.vars = c(weight),
+                             .funs = funs(loss_ratio_band = floor(cumsum(.) / weight_sum * 10)/10)
+                            )
+} 
+    
+df_temp <- df_sort %>%
+            group_by(loss_ratio_band) %>%
+            summarise(model_loss_ratio = sum(!!sym(predictions)*!!sym(weight))/sum(!!sym(weight)),
+                      actual_loss_ratio = sum(!!sym(actual_loss))/sum(!!sym(weight))) %>%
+            ungroup()
+    
+chart <- plot_ly() %>%
+            add_trace(df_temp, x = df_temp$loss_ratio_band, y= df_temp$actual_loss_ratio, type = 'bar',
+                      name = 'Actuals', text = round(df_temp$actual_loss_ratio, 4), textposition = 'auto') %>%
+            add_trace(df_temp, x = df_temp$loss_ratio_band, y= df_temp$model_loss_ratio, type = 'bar',
+                      name = 'Predictions', text = round(df_temp$model_loss_ratio, 4), textposition = 'auto') %>%
+            layout(title = 'Actual vs. Predicted Loss Ratio',
+                     barmode = 'group',
+                     xaxis = list(title = "Percentile"),
+                     yaxis = list(title = "Loss Ratio"))
+return(chart)
+}
+
+
+
+lr_plm_chart <- function(data, target, predictions, weight, actual_loss,
+                                pre_sort = FALSE, pre_sort_col = NULL){
+
+require(plotly)
+require(rlang)
+    
+prediction_sum <- sum(data[[predictions]])+1
+
+if(pre_sort == FALSE){
+    df_sort <- data %>%
+                   arrange_at(.vars = c(predictions)) %>%
+                   mutate_at(.vars = c(predictions),
+                             .funs = funs(loss_ratio_band = floor(cumsum(.) / prediction_sum * 10)/10))
+} else{
+    df_sort <- data
+    df_sort$loss_ratio_band <- as.factor(data[[pre_sort_col]])
+}    
+df_temp <- df_sort %>%
+            group_by(loss_ratio_band) %>%
+            summarise(model_loss_ratio = sum(!!sym(predictions)*!!sym(weight))/sum(!!sym(weight)),
+                      actual_loss_ratio = sum(!!sym(actual_loss))/sum(!!sym(weight)))
+    
+chart <- plot_ly() %>%
+            add_trace(df_temp, x = df_temp$loss_ratio_band, y= df_temp$actual_loss_ratio, type = 'bar',
+                      name = 'Actuals', text = round(df_temp$actual_loss_ratio, 4), textposition = 'auto') %>%
+           layout(title = 'Actual vs. Predicted Loss Ratio',
+                     barmode = 'group',
+                     xaxis = list(title = "Percentile"),
+                     yaxis = list(title = "Loss Ratio"))
+return(chart)
+}
+
+
+
+
+library(plotly)
+library(rlang)
+      
+lr_spread_chart <- function(data, target, predictions, weight, actual_loss, nbuckets = 10,
+                                       title1, title2){
+    
+weight_sum <- sum(data[[weight]])+1
+loss_sum <- sum(data[[actual_loss]])
+
+df_sort <- data %>%
+             arrange_at(.vars = c(predictions)) %>%
+             mutate_at(.vars = c(weight),
+                       .funs = funs(loss_ratio_band = floor(cumsum(.) / weight_sum * nbuckets)/nbuckets)
+                       )
+
+df_temp <- df_sort %>%
+            group_by(loss_ratio_band) %>%
+            summarise(actual_loss = sum(!!sym(actual_loss)),
+                      total_prem = sum(!!sym(weight)),
+                      model_loss_ratio = sum(!!sym(predictions)*!!sym(weight))/sum(!!sym(weight)),
+                      actual_loss_ratio = sum(!!sym(actual_loss))/sum(!!sym(weight))) %>%
+            ungroup() %>%
+            mutate(decile = 1:n(),
+                   attractive_loss = cumsum(actual_loss),
+                   attractive_prem = cumsum(total_prem)) %>%
+            mutate(unattractive_loss = loss_sum - attractive_loss,
+                   unattractive_prem = weight_sum - attractive_prem) %>%
+            mutate(attractive_lr = attractive_loss/attractive_prem,
+                   unattractive_lr = unattractive_loss/unattractive_prem) %>%
+            filter(decile < max(decile))
+    
+#return(df_temp)  
+chart <- plot_ly() %>%
+            add_trace(df_temp, x = df_temp$decile, y= df_temp$unattractive_lr, type = 'scatter', mode = 'lines',
+                      name = title1, text = round(df_temp$unattractive_lr, 4), textposition = 'auto') %>%
+            add_trace(df_temp, x = df_temp$decile, y= df_temp$attractive_lr, type = 'scatter', mode = 'lines',
+                      name = title2, text = round(df_temp$attractive_lr, 4), textposition = 'auto') %>%
+            layout(title = 'Attractive/Unnatractive Loss Ratio Spread',
+                     #barmode = 'group',
+                     xaxis = list(title = "Decile Split"),
+                     yaxis = list(title = "Loss Ratio"))
+return(chart)
+}
+
+
+
+weighted_rmse <- function(actual, predicted, weight){
+    "Calculates the RMSE value between actual and predicted with weights
+    
+    Arguments:
+        actual: vector of actual values
+        predicted: vecotr of predicted values
+        weight: vector of weights
+    
+    Written by ???
+    Documented by Tim Ivancic
+    "
+    return(sqrt(sum((predicted-actual)^2*weight/sum(weight), na.rm=TRUE)))
+}
+
+
+
+
+
+
+
+predictor_compare <- function(df1, df2, chi_vars, ks_vars, alpha, title1, title2){
+	
+	suppressWarnings({
+	# Dependencies
+	require(dplyr)
+	require(plotly)
+	
+	# Track function run time
+	run_tm <- proc.time()
+
+	# K-S Test
+	ks_tbl <- data.frame()
+	for(var in ks_vars){
+    ks_temp <- ks.test(x = df1[[var]], y = df2[[var]])
+    temp_df <- cbind(var, ks_temp$p.value)
+    ks_tbl <- rbind(ks_tbl, temp_df, stringsAsFactors = F)
+   }
+	names(ks_tbl) <- c('variable', 'p_value')
+
+	# Chi-Square Test
+	chi_tbl <- data.frame()
+	for(var in chi_vars){
+			all_levels <- union(levels(factor(df1[[var]])), levels(factor(df2[[var]])))
+	    probs_df1 <- table(factor(df1[[var]], levels = all_levels))/length(df1[[var]])
+	    tbl_df2 <- table(factor(df2[[var]], levels = all_levels))
+	    chi_results <- chisq.test(x = tbl_df2, p = probs_df1)#, simulate.p.value=TRUE)
+	    temp_df <- cbind(var, chi_results$p.value)
+	    chi_tbl <- rbind(chi_tbl, temp_df, stringsAsFactors = F)
+	   }
+	})
+	names(chi_tbl) <- c('variable', 'p_value')
+	chi_tbl$p_value <- as.numeric(chi_tbl$p_value)
+	
+	# Significance Filter (alpha)
+	ks_tbl <- dplyr::filter(ks_tbl, p_value < alpha)
+	chi_tbl <- dplyr::filter(chi_tbl, p_value < alpha)
+	
+	# Chi-square plots
+	chi_plots <- list()
+	for(var in chi_tbl$variable){
+		df1_temp <- df1 %>%
+	    					group_by_at(.vars =  var) %>%
+	    					select(var) %>%
+	    					summarise('counts' = n()/nrow(.))
+	    
+		df2_temp <- df2 %>%
+	    					group_by_at(.vars =  var) %>%
+	    					select(var) %>%
+	    					summarise('counts' = n()/nrow(.))
+	    
+		chi_plots[[var]] <- plot_ly() %>%
+			    						    add_trace(df1, x = df1_temp[[var]], y= df1_temp[['counts']], type = 'bar', name = title1,
+											              text = round(df1_temp[['counts']], 2), textposition = 'auto') %>%
+											    add_trace(df2, x = df2_temp[[var]], y= df2_temp[['counts']], type = 'bar', name = title2,
+											              text = round(df2_temp[['counts']], 2), textposition = 'auto') %>%
+										      layout(title = var,
+												         barmode = 'group',
+												         xaxis = list(title = ""),
+												         yaxis = list(title = "Frequency"))
+	  }
+	  
+	# K-S plots
+	ks_plots <- list()
+	for(var in ks_tbl$variable){
+	    
+		fit1 <- density(df1[[var]], na.rm = T)
+		fit2 <- density(df2[[var]], na.rm = T)
+		    
+		bin_num <- length(unique(df1[[var]]))
+		start_bin <- min(df1[[var]], na.rm = T)
+		end_bin <- max(df1[[var]], na.rm = T)
+		bin_length <- (start_bin - end_bin)/bin_num
+		bin_list <- list(start = start_bin, end = end_bin, size = bin_length)
+		    
+		ks_plots[[var]] <- plot_ly(alpha = 0.6, height = 800, width = 1500) %>%
+		         add_trace(df1, x = df1[[var]], type = 'histogram', histnorm = "probability", name = title1, color = I('mediumturquoise'),
+		                   autobinx = FALSE, xbins = bin_list) %>%
+		         add_trace(df2, x = df2[[var]], type = 'histogram', histnorm = "probability", name = title2, color = I('olivedrab3'),
+		                   autobinx = FALSE, xbins = bin_list) %>%
+		         add_trace(x = fit1$x, y = fit1$y, type = 'scatter', mode = "lines", yaxis = "y1", name = paste0(title1, " Density"), color = I('springgreen4')) %>%
+		         add_trace(x = fit2$x, y = fit2$y, type = 'scatter', mode = "lines", yaxis = "y1", name = paste0(title2, " Density"), color = I('olivedrab4')) %>%
+		         layout(title = var,
+		                barmode = 'overlay',
+		                xaxis = list(title = ""),
+		                yaxis = list(title = "Frequency"),
+		                margin = list(l = 130, r = 50, b = 50, t = 50, pad = 4))
+		}
+	
+	# Compile outputs into one list	
+	outputs <- list(ks_tbl = ks_tbl,
+									chi_tbl = chi_tbl,
+									ks_plots = ks_plots,
+									chi_plots = chi_plots
+									)
+	# Print final runtime
+	run_tm_final <- (proc.time() - run_tm)
+	print(run_tm_final)
+
+return(outputs)
+}
+
